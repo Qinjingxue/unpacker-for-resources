@@ -1,5 +1,5 @@
 # unpacker-for-resources
-Chatgpt5.1写的一个windows下自动循环解压目录下（不包含子目录）文件的小脚本
+AI写的一个windows下自动循环解压目录下（不包含子目录）文件的小脚本
 
 ## 运行平台
 Windows
