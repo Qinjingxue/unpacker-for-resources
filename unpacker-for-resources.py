@@ -82,7 +82,7 @@ class DecompressionEngine:
         for root, _, files in os.walk(target_dir):
             for f in files:
                 path = os.path.join(root, f)
-                if self.is_possible_archive(path) or re.search(r"\.(part\d+\.rar|\d+)", f, re.I):
+                if self.is_possible_archive(path) or re.search(r"\.(part\d+\.rar|[rz]?\d+)$", f, re.I):
                     lname = self.get_logical_name(f).lower()
                     key = os.path.join(root, lname)
                     groups[key].append(path)
@@ -93,7 +93,7 @@ class DecompressionEngine:
                 if key in self.processed or key in self.in_progress: continue
                 paths.sort()
                 if not any(self.is_possible_archive(p) for p in paths): continue
-                main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001)$", p, re.I)), paths[0])
+                main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar)$", p, re.I)), paths[0])
                 self.processed.add(key)
                 archives.append((key, main, paths))
         return archives
