@@ -72,9 +72,24 @@ class DecompressionEngine:
             return False
 
     def get_logical_name(self, filename: str) -> str:
-        name = re.sub(r"\.part\d+\.rar$", "", filename, flags=re.I)
-        name = re.sub(r"\.(7z|zip|rar)\.\d+$", "", name, flags=re.I)
-        return os.path.splitext(name)[0].strip().rstrip('.')
+        # 1. Handle split RAR: .part1.rar, .part01.rar
+        name, count = re.subn(r"\.part\d+\.rar$", "", filename, flags=re.I)
+        if count > 0: return name.strip().rstrip('.')
+        
+        # 2. Handle 7z/zip/rar split: .7z.001, .zip.001, .rar.001
+        name, count = re.subn(r"\.(7z|zip|rar)\.\d+$", "", name, flags=re.I)
+        if count > 0: return name.strip().rstrip('.')
+            
+        # 3. Handle traditional split: .001, .002
+        name, count = re.subn(r"\.\d{3}$", "", name, flags=re.I)
+        if count > 0: return name.strip().rstrip('.')
+
+        # 4. Handle standard extension: .7z, .rar, .zip
+        base, ext = os.path.splitext(filename)
+        if ext.lower() in ('.7z', '.rar', '.zip'):
+            return base.strip().rstrip('.')
+        
+        return filename.strip().rstrip('.')
 
     def scan_archives(self, target_dir=None):
         target_dir = target_dir or self.root_dir
@@ -82,6 +97,7 @@ class DecompressionEngine:
         for root, _, files in os.walk(target_dir):
             for f in files:
                 path = os.path.join(root, f)
+                # Initial filter: magic number or split volume pattern
                 if self.is_possible_archive(path) or re.search(r"\.(part\d+\.rar|[rz]?\d+)$", f, re.I):
                     lname = self.get_logical_name(f).lower()
                     key = os.path.join(root, lname)
@@ -92,7 +108,13 @@ class DecompressionEngine:
             with self.lock:
                 if key in self.processed or key in self.in_progress: continue
                 paths.sort()
-                if not any(self.is_possible_archive(p) for p in paths): continue
+                
+                # Permissive check: if it has the signature OR it has a definitive archive extension
+                is_arch = any(self.is_possible_archive(p) for p in paths)
+                if not is_arch:
+                    if not any(re.search(r"\.(7z|zip|rar|part0*1\.rar|001)$", p, re.I) for p in paths):
+                        continue
+                
                 main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar)$", p, re.I)), paths[0])
                 self.processed.add(key)
                 archives.append((key, main, paths))
@@ -303,20 +325,33 @@ class ArchiveUnpackerApp:
         self.setup_ui()
 
     def setup_ui(self):
-        f1 = tk.Frame(self.root); f1.pack(pady=5, fill=tk.X, padx=10)
+        # 1. Directory Selection (Always visible)
+        f1 = tk.Frame(self.root); f1.pack(pady=10, fill=tk.X, padx=10)
         tk.Label(f1, text="工作目录:").pack(side=tk.LEFT)
-        self.ent_dir = tk.Entry(f1); self.ent_dir.insert(0, os.getcwd()); self.ent_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        tk.Button(f1, text="选择...", command=lambda: self.ent_dir.insert(0, filedialog.askdirectory() or self.ent_dir.get())).pack(side=tk.LEFT)
+        self.ent_dir = tk.Entry(f1); self.ent_dir.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        tk.Button(f1, text="选择...", command=self.browse_dir).pack(side=tk.LEFT)
 
-        f2 = tk.Frame(self.root); f2.pack(pady=5, fill=tk.X, padx=10)
+        # 2. Main Container (Hidden until directory is selected)
+        self.main_container = tk.Frame(self.root)
+        
+        f2 = tk.Frame(self.main_container); f2.pack(pady=5, fill=tk.X, padx=10)
         tk.Label(f2, text="解压密码 (一行一个):").pack(anchor="w")
-        self.txt_pwd = tk.Text(f2, height=4); self.txt_pwd.pack(fill=tk.X)
+        self.txt_pwd = tk.Text(f2, height=4); self.txt_pwd.pack(fill=tk.X, padx=10)
 
-        self.btn_start = tk.Button(self.root, text="开始处理", command=self.start, bg="#DDDDDD", width=15); self.btn_start.pack(pady=5)
-        self.txt_log = scrolledtext.ScrolledText(self.root, state='disabled'); self.txt_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.btn_start = tk.Button(self.main_container, text="开始处理", command=self.start, bg="#DDDDDD", width=15); self.btn_start.pack(pady=10)
+        self.txt_log = scrolledtext.ScrolledText(self.main_container, state='disabled'); self.txt_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+    def browse_dir(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.ent_dir.delete(0, tk.END)
+            self.ent_dir.insert(0, d)
+            # Show the rest of the UI
+            self.main_container.pack(fill=tk.BOTH, expand=True)
 
     def log(self, msg):
-        self.root.after(0, lambda: (self.txt_log.config(state='normal'), self.txt_log.insert(tk.END, f"{msg}\n"), self.txt_log.see(tk.END), self.txt_log.config(state='disabled')))
+        if hasattr(self, 'txt_log'):
+            self.root.after(0, lambda: (self.txt_log.config(state='normal'), self.txt_log.insert(tk.END, f"{msg}\n"), self.txt_log.see(tk.END), self.txt_log.config(state='disabled')))
 
     def start(self):
         pwds = [l.strip() for l in self.txt_pwd.get("1.0", tk.END).split('\n') if l.strip()]
