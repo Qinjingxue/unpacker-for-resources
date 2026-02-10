@@ -16,7 +16,7 @@ from collections import deque, defaultdict
 
 class DecompressionEngine:
     def __init__(self, root_dir, passwords, log_callback, completion_callback):
-        self.root_dir = root_dir
+        self.root_dir = os.path.normpath(root_dir)
         self.passwords = passwords
         self.log_callback = log_callback
         self.completion_callback = completion_callback
@@ -97,12 +97,12 @@ class DecompressionEngine:
         groups = defaultdict(list)
         for root, _, files in os.walk(target_dir):
             for f in files:
-                path = os.path.join(root, f)
+                path = os.path.normpath(os.path.join(root, f))
                 is_arch_sig = self.is_possible_archive(path)
                 # Initial filter: magic number or split volume pattern
                 if is_arch_sig or re.search(r"\.(part\d+\.rar|[rz]?\d+)$", f, re.I):
                     lname = self.get_logical_name(f, is_archive=is_arch_sig).lower()
-                    key = os.path.join(root, lname)
+                    key = os.path.normpath(os.path.join(root, lname))
                     groups[key].append(path)
 
         archives = []
@@ -118,7 +118,6 @@ class DecompressionEngine:
                         continue
                 
                 main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar|gz|bz2|xz|exe)$", p, re.I)), paths[0])
-                self.processed.add(key)
                 archives.append((key, main, paths))
         return archives
 
@@ -209,7 +208,9 @@ class DecompressionEngine:
                     r = subprocess.run(cmd, capture_output=True, text=True, startupinfo=si)
                     if r.returncode == 0:
                         self.log(f"[EXTRACT] 成功: {archive}")
-                        with self.lock: self.unpacked_archives.append(all_parts)
+                        with self.lock:
+                            self.unpacked_archives.append(all_parts)
+                            self.processed.add(key)
                         return out_dir
                     err = r.stderr.lower()
 
@@ -295,13 +296,27 @@ class DecompressionEngine:
                                 if new: pending.extend(new)
                         except: pass
             executor.shutdown(wait=True)
-            self.log("\n[CLEAN] 删除已成功解压的分卷...")
+            self.log("\n[CLEAN] 任务结束，开始清理已成功解压的归档文件...")
             with self.lock:
+                if not self.unpacked_archives:
+                    self.log("[CLEAN] 没有发现需要清理的归档文件。")
                 while self.unpacked_archives:
-                    for f in self.unpacked_archives.popleft():
+                    parts = self.unpacked_archives.popleft()
+                    for f in parts:
+                        f = os.path.normpath(f)
                         if os.path.exists(f):
-                            try: send2trash(f)
-                            except: pass
+                            fname = os.path.basename(f)
+                            self.log(f"[CLEAN] 正在清理: {fname}")
+                            try:
+                                send2trash(f)
+                            except Exception as e:
+                                self.log(f"[WARN] 无法移至回收站 ({e})，尝试直接删除: {fname}")
+                                try:
+                                    os.remove(f)
+                                except Exception as e2:
+                                    self.log(f"[ERROR] 彻底删除失败: {fname} (错误: {e2})")
+                        else:
+                            self.log(f"[DEBUG] 文件已不存在，跳过清理: {f}")
             self.flatten_dirs(self.root_dir)
             
             # --- Final Summary Report ---
