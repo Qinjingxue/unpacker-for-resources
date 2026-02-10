@@ -63,15 +63,16 @@ class DecompressionEngine:
             self.log_callback(message)
 
     def is_possible_archive(self, path):
-        MAGIC_7Z, MAGIC_RAR, MAGIC_ZIP = b"7z\xbc\xaf'\x1c", b"Rar!", b"PK"
+        # Common archive magic numbers: 7z, RAR, ZIP, GZIP, BZIP2, XZ, SFX (MZ)
+        MAGICS = [b"7z\xbc\xaf'\x1c", b"Rar!", b"PK", b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"MZ"]
         try:
             with open(path, "rb") as f:
                 sig = f.read(8)
-            return any(sig.startswith(m) for m in [MAGIC_7Z, MAGIC_RAR, MAGIC_ZIP])
+            return any(sig.startswith(m) for m in MAGICS)
         except:
             return False
 
-    def get_logical_name(self, filename: str) -> str:
+    def get_logical_name(self, filename: str, is_archive: bool = False) -> str:
         # 1. Handle split RAR: .part1.rar, .part01.rar
         name, count = re.subn(r"\.part\d+\.rar$", "", filename, flags=re.I)
         if count > 0: return name.strip().rstrip('.')
@@ -84,9 +85,9 @@ class DecompressionEngine:
         name, count = re.subn(r"\.\d{3}$", "", name, flags=re.I)
         if count > 0: return name.strip().rstrip('.')
 
-        # 4. Handle standard extension: .7z, .rar, .zip
+        # 4. Handle standard extension or forced archive (stripping any extension to avoid clash)
         base, ext = os.path.splitext(filename)
-        if ext.lower() in ('.7z', '.rar', '.zip'):
+        if is_archive or ext.lower() in ('.7z', '.rar', '.zip', '.gz', '.bz2', '.xz', '.exe'):
             return base.strip().rstrip('.')
         
         return filename.strip().rstrip('.')
@@ -97,9 +98,10 @@ class DecompressionEngine:
         for root, _, files in os.walk(target_dir):
             for f in files:
                 path = os.path.join(root, f)
+                is_arch_sig = self.is_possible_archive(path)
                 # Initial filter: magic number or split volume pattern
-                if self.is_possible_archive(path) or re.search(r"\.(part\d+\.rar|[rz]?\d+)$", f, re.I):
-                    lname = self.get_logical_name(f).lower()
+                if is_arch_sig or re.search(r"\.(part\d+\.rar|[rz]?\d+)$", f, re.I):
+                    lname = self.get_logical_name(f, is_archive=is_arch_sig).lower()
                     key = os.path.join(root, lname)
                     groups[key].append(path)
 
@@ -112,10 +114,10 @@ class DecompressionEngine:
                 # Permissive check: if it has the signature OR it has a definitive archive extension
                 is_arch = any(self.is_possible_archive(p) for p in paths)
                 if not is_arch:
-                    if not any(re.search(r"\.(7z|zip|rar|part0*1\.rar|001)$", p, re.I) for p in paths):
+                    if not any(re.search(r"\.(7z|zip|rar|gz|bz2|xz|exe|part0*1\.rar|001)$", p, re.I) for p in paths):
                         continue
                 
-                main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar)$", p, re.I)), paths[0])
+                main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar|gz|bz2|xz|exe)$", p, re.I)), paths[0])
                 self.processed.add(key)
                 archives.append((key, main, paths))
         return archives
@@ -171,11 +173,20 @@ class DecompressionEngine:
         try:
             with self.lock: self.in_progress.add(key)
             out_dir = os.path.join(os.path.dirname(archive), os.path.basename(key))
+            if out_dir.lower() == archive.lower():
+                out_dir += "_extracted"
             
             while retry_count < self.max_retries:
                 if not self.ensure_space(5): return None
                 self.log(f"\n[EXTRACT] 开始: {archive}")
-                os.makedirs(out_dir, exist_ok=True)
+                
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except Exception as e:
+                    self.log(f"[ERROR] 无法创建输出目录 {out_dir}: {e}")
+                    self.failed_tasks.append(f"{os.path.basename(archive)} [目录创建失败]")
+                    return None
+
                 correct_pwd, r, err = None, None, ""
                 si = subprocess.STARTUPINFO() if os.name == 'nt' else None
                 if si: si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
